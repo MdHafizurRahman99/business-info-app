@@ -17,6 +17,7 @@ return new class extends Migration
             $table->string('name')->nullable(false);
             $table->text('category')->nullable();
             $table->text('address')->nullable(false);
+            $table->string('postcode', 10)->nullable();
             $table->string('phone', 50)->nullable();
             $table->string('website')->nullable();
             $table->string('email')->nullable();

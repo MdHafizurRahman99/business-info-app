@@ -20,13 +20,14 @@ class BusinessController extends Controller
     }
 
     /**
-     * Search for businesses
+     * Search for businesses by location or postcode
      */
     public function search(Request $request): JsonResponse
     {
-        // Validate request parameters
+        // Validate request parameters - allow either location OR postcode
         $validator = Validator::make($request->all(), [
-            'location' => 'required|string|max:255',
+            'location' => 'required_without:postcode|string|max:255',
+            'postcode' => 'required_without:location|string|max:10',
             'radius' => 'required|integer|min:1|max:50000',
             'category' => 'required|string|max:100',
         ]);
@@ -39,12 +40,21 @@ class BusinessController extends Controller
         }
 
         try {
+            // Get search parameters
             $location = $request->input('location');
+            $postcode = $request->input('postcode');
             $radius = $request->input('radius');
             $category = $request->input('category');
 
+            // If postcode is provided but location isn't, convert postcode to location
+            if (!$location && $postcode) {
+                $location = $postcode . ', Australia';
+                Log::info("Using postcode as location", ['postcode' => $postcode, 'location' => $location]);
+            }
+
             Log::info("Searching for businesses", [
                 'location' => $location,
+                'postcode' => $postcode,
                 'radius' => $radius,
                 'category' => $category
             ]);
@@ -57,6 +67,14 @@ class BusinessController extends Controller
             $businesses = [];
 
             foreach ($placesData as $placeData) {
+                // Extract postcode from address if available
+                if ($postcode && !isset($placeData['postcode'])) {
+                    $placeData['postcode'] = $postcode;
+                } else {
+                    // Try to extract postcode from address
+                    $placeData['postcode'] = $this->extractPostcode($placeData['address'] ?? '');
+                }
+
                 // Check if business already exists in database
                 $business = Business::where('place_id', $placeData['place_id'])->first();
 
@@ -76,9 +94,14 @@ class BusinessController extends Controller
             return response()->json([
                 'message' => 'Search completed successfully',
                 'total_found' => count($businesses),
+                'search_params' => [
+                    'location' => $location,
+                    'postcode' => $postcode,
+                    'radius' => $radius,
+                    'category' => $category
+                ],
                 'data' => $businesses
             ]);
-
         } catch (\Exception $e) {
             Log::error('Business search error: ' . $e->getMessage(), [
                 'trace' => $e->getTraceAsString()
@@ -92,7 +115,10 @@ class BusinessController extends Controller
     }
 
     /**
-     * Get all businesses from database
+     * Get all businesses from database with optional postcode filter
+     */
+    /**
+     * Get all businesses from database with optional filters
      */
     public function index(Request $request): JsonResponse
     {
@@ -101,6 +127,15 @@ class BusinessController extends Controller
         // Filter by category if provided
         if ($request->has('category')) {
             $query->where('category', 'LIKE', '%' . $request->input('category') . '%');
+        }
+
+        // Filter by postcode if provided
+        if ($request->has('postcode')) {
+            $postcode = $request->input('postcode');
+            $query->where(function ($q) use ($postcode) {
+                $q->where('postcode', $postcode)
+                    ->orWhere('address', 'LIKE', "%{$postcode}%");
+            });
         }
 
         // Filter by location (basic radius search)
@@ -115,6 +150,11 @@ class BusinessController extends Controller
             );
         }
 
+        // Filter by google_rating (less than or equal to 3) if provided
+        if ($request->has('google_rating') && $request->input('google_rating') === 'low') {
+            $query->where('google_rating', '<=', 3);
+        }
+
         $businesses = $query->orderBy('google_rating', 'desc')->paginate(20);
 
         // Add debug info
@@ -124,7 +164,7 @@ class BusinessController extends Controller
             'debug_info' => [
                 'total_businesses_in_db' => $totalCount,
                 'filtered_results' => $businesses->total(),
-                'filters_applied' => $request->only(['category', 'lat', 'lng', 'radius'])
+                'filters_applied' => $request->only(['category', 'lat', 'lng', 'radius', 'postcode', 'google_rating'])
             ],
             'pagination' => $businesses
         ]);
@@ -147,22 +187,18 @@ class BusinessController extends Controller
     }
 
     /**
-     * Get database statistics
+     * Extract Australian postcode (4 digits) from address
      */
-    public function stats(): JsonResponse
+    private function extractPostcode($address)
     {
-        $totalBusinesses = Business::count();
-        $categoryCounts = Business::selectRaw('category, COUNT(*) as count')
-            ->groupBy('category')
-            ->orderBy('count', 'desc')
-            ->limit(10)
-            ->get();
+        if (empty($address)) {
+            return null;
+        }
 
-        return response()->json([
-            'total_businesses' => $totalBusinesses,
-            'top_categories' => $categoryCounts,
-            'sample_businesses' => Business::limit(5)->get(['id', 'name', 'category', 'address'])
-        ]);
+        // Australian postcodes are 4 digits
+        preg_match('/\b(\d{4})\b(?![\w\d])/', $address, $matches);
+
+        return $matches[1] ?? null;
     }
 
     /**

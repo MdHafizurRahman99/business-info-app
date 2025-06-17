@@ -4,10 +4,11 @@ namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+
 class GooglePlacesService
 {
-    private $apiKey;
-    private $baseUrl = 'https://maps.googleapis.com/maps/api/place';
+    protected $apiKey;
+    protected $baseUrl = 'https://maps.googleapis.com/maps/api/place';
 
     public function __construct()
     {
@@ -17,195 +18,202 @@ class GooglePlacesService
     /**
      * Search for places using Google Places API
      */
-    public function searchPlaces(string $location, int $radius, string $category): array
+    public function searchPlaces($location, $radius = 5000, $type = 'restaurant')
     {
         try {
-            // First, geocode the location to get coordinates
-            $coordinates = $this->geocodeLocation($location);
-
-            if (!$coordinates) {
-                throw new \Exception('Unable to geocode location: ' . $location);
-            }
-
-            // Map category to Google Places types
-            $placeType = $this->mapCategoryToPlaceType($category);
-
-            // Search for places
-            $response = Http::withOptions([
-                'verify' => false, // Disable SSL verification for local development
-                'timeout' => 30,
-            ])->get($this->baseUrl . '/nearbysearch/json', [
-                'location' => $coordinates['lat'] . ',' . $coordinates['lng'],
-                'radius' => min($radius, 5000), // Max 5km as per Google API
-                'type' => $placeType,
-                'key' => $this->apiKey,
+            Log::info("Searching places with Google Places API", [
+                'location' => $location,
+                'radius' => $radius,
+                'type' => $type
             ]);
 
-            if (!$response->successful()) {
-                throw new \Exception('Google Places API request failed');
+            // First, geocode the location or postcode
+            $geocodeData = $this->geocodeLocation($location);
+
+            if (!$geocodeData) {
+                Log::error("Failed to geocode location: {$location}");
+                return [];
+            }
+
+            $lat = $geocodeData['lat'];
+            $lng = $geocodeData['lng'];
+
+            Log::info("Geocoded location", [
+                'lat' => $lat,
+                'lng' => $lng,
+                'formatted_address' => $geocodeData['formatted_address'] ?? $location
+            ]);
+
+            // Now search for places near this location
+            $response = Http::withOptions([
+                'verify' => false, // Only use in development
+            ])->get("{$this->baseUrl}/nearbysearch/json", [
+                'location' => "{$lat},{$lng}",
+                'radius' => $radius,
+                'type' => $type,
+                'key' => $this->apiKey
+            ]);
+
+            if ($response->failed()) {
+                Log::error("Google Places API request failed", [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+                return [];
             }
 
             $data = $response->json();
-            Log::info('Response data:', $data);
-            if ($data['status'] !== 'OK' && $data['status'] !== 'ZERO_RESULTS') {
-                throw new \Exception('Google Places API error: ' . $data['status']);
+
+            if ($data['status'] !== 'OK') {
+                Log::error("Google Places API returned non-OK status", [
+                    'status' => $data['status'],
+                    'error_message' => $data['error_message'] ?? 'No error message provided'
+                ]);
+                return [];
             }
 
-            return $this->formatPlacesData($data['results'] ?? []);
+            $businesses = [];
+            foreach ($data['results'] as $result) {
+                // Get details for each place to get more information
+                $details = $this->getPlaceDetails($result['place_id']);
+
+                $businesses[] = [
+                    'place_id' => $result['place_id'],
+                    'name' => $result['name'],
+                    'address' => $details['formatted_address'] ?? $result['vicinity'] ?? '',
+                    'phone' => $details['formatted_phone_number'] ?? null,
+                    'website' => $details['website'] ?? null,
+                    'latitude' => $result['geometry']['location']['lat'],
+                    'longitude' => $result['geometry']['location']['lng'],
+                    'category' => implode(',', $result['types'] ?? []),
+                    'google_rating' => $result['rating'] ?? null,
+                    'user_ratings_total' => $result['user_ratings_total'] ?? null
+                ];
+            }
+
+            Log::info("Found " . count($businesses) . " businesses");
+            return $businesses;
 
         } catch (\Exception $e) {
-            Log::error('Google Places API error: ' . $e->getMessage());
-            throw $e;
+            Log::error("Error in searchPlaces: " . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+            return [];
         }
     }
 
     /**
      * Geocode a location string to coordinates
      */
-    private function geocodeLocation(string $location): ?array
-    {
-        $response = Http::withOptions([
-            'verify' => false, // Disable SSL verification for local development
-            'timeout' => 30,
-        ])->get('https://maps.googleapis.com/maps/api/geocode/json', [
-            'address' => $location,
-            'key' => $this->apiKey,
-        ]);
-
-        if (!$response->successful()) {
-            return null;
-        }
-
-        $data = $response->json();
-
-        if ($data['status'] !== 'OK' || empty($data['results'])) {
-            return null;
-        }
-
-        $result = $data['results'][0];
-        return [
-            'lat' => $result['geometry']['location']['lat'],
-            'lng' => $result['geometry']['location']['lng'],
-        ];
-    }
-
-    /**
-     * Map category to Google Places type
-     */
-    private function mapCategoryToPlaceType(string $category): string
-    {
-        $categoryMap = [
-            'restaurant' => 'restaurant',
-            'cafe' => 'cafe',
-            'store' => 'store',
-            'shopping' => 'shopping_mall',
-            'gas_station' => 'gas_station',
-            'hospital' => 'hospital',
-            'pharmacy' => 'pharmacy',
-            'bank' => 'bank',
-            'atm' => 'atm',
-            'hotel' => 'lodging',
-            'gym' => 'gym',
-            'beauty_salon' => 'beauty_salon',
-            'car_repair' => 'car_repair',
-            'dentist' => 'dentist',
-            'doctor' => 'doctor',
-            'lawyer' => 'lawyer',
-            'real_estate' => 'real_estate_agency',
-        ];
-
-        return $categoryMap[strtolower($category)] ?? $category;
-    }
-
-    /**
-     * Format places data from Google API response
-     */
-    private function formatPlacesData(array $places): array
-    {
-        return array_map(function ($place) {
-            return [
-                'place_id' => $place['place_id'],
-                'name' => $place['name'],
-                'category' => implode(', ', $place['types'] ?? []),
-                'address' => $place['vicinity'] ?? $place['formatted_address'] ?? '',
-                'phone' => $place['formatted_phone_number'] ?? null,
-                'website' => $place['website'] ?? null,
-                'email' => $place['email'] ?? null,
-                'google_rating' => $place['rating'] ?? null,
-                'user_ratings_total' => $place['user_ratings_total'] ?? null,
-                'latitude' => $place['geometry']['location']['lat'],
-                'longitude' => $place['geometry']['location']['lng'],
-            ];
-        }, $places);
-    }
-
-    /**
-     * Get detailed place information
-     */
-    public function getPlaceDetails(string $placeId): ?array
-    {
-        $response = Http::withOptions([
-            'verify' => false, // Disable SSL verification for local development
-            'timeout' => 30,
-        ])->get($this->baseUrl . '/details/json', [
-            'place_id' => $placeId,
-            'fields' => 'name,formatted_address,formatted_phone_number,website,rating,user_ratings_total,geometry,types',
-            'key' => $this->apiKey,
-        ]);
-
-        if (!$response->successful()) {
-            return null;
-        }
-
-        $data = $response->json();
-
-        if ($data['status'] !== 'OK') {
-            return null;
-        }
-
-        $place = $data['result'];
-
-        return [
-            'place_id' => $placeId,
-            'name' => $place['name'],
-            'category' => implode(', ', $place['types'] ?? []),
-            'address' => $place['formatted_address'] ?? '',
-            'phone' => $place['formatted_phone_number'] ?? null,
-            'website' => $place['website'] ?? null,
-            'google_rating' => $place['rating'] ?? null,
-            'user_ratings_total' => $place['user_ratings_total'] ?? null,
-            'latitude' => $place['geometry']['location']['lat'],
-            'longitude' => $place['geometry']['location']['lng'],
-        ];
-    }
-
-    /**
-     * Test API connectivity
-     */
-    public function testConnection(): array
+    protected function geocodeLocation($location)
     {
         try {
             $response = Http::withOptions([
-                'verify' => false,
-                'timeout' => 10,
-            ])->get($this->baseUrl . '/nearbysearch/json', [
-                'location' => '-37.8136,144.9631', // Melbourne coordinates
-                'radius' => 1000,
-                'type' => 'restaurant',
-                'key' => $this->apiKey,
+                'verify' => false, // Only use in development
+            ])->get('https://maps.googleapis.com/maps/api/geocode/json', [
+                'address' => $location,
+                'key' => $this->apiKey
             ]);
 
+            if ($response->failed()) {
+                Log::error("Geocoding API request failed", [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+                return null;
+            }
+
+            $data = $response->json();
+
+            if ($data['status'] !== 'OK' || empty($data['results'])) {
+                Log::error("Geocoding API returned non-OK status or no results", [
+                    'status' => $data['status'],
+                    'error_message' => $data['error_message'] ?? 'No error message provided'
+                ]);
+                return null;
+            }
+
+            $result = $data['results'][0];
             return [
-                'success' => $response->successful(),
-                'status_code' => $response->status(),
-                'api_status' => $response->json()['status'] ?? 'unknown',
-                'results_count' => count($response->json()['results'] ?? []),
-                'response' => $response->json(),
+                'lat' => $result['geometry']['location']['lat'],
+                'lng' => $result['geometry']['location']['lng'],
+                'formatted_address' => $result['formatted_address']
+            ];
+
+        } catch (\Exception $e) {
+            Log::error("Error in geocodeLocation: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Get detailed information about a place
+     */
+    protected function getPlaceDetails($placeId)
+    {
+        try {
+            $response = Http::withOptions([
+                'verify' => false, // Only use in development
+            ])->get("{$this->baseUrl}/details/json", [
+                'place_id' => $placeId,
+                'fields' => 'formatted_address,formatted_phone_number,website',
+                'key' => $this->apiKey
+            ]);
+
+            if ($response->failed()) {
+                Log::error("Place Details API request failed", [
+                    'status' => $response->status(),
+                    'body' => $response->body()
+                ]);
+                return null;
+            }
+
+            $data = $response->json();
+
+            if ($data['status'] !== 'OK') {
+                Log::error("Place Details API returned non-OK status", [
+                    'status' => $data['status'],
+                    'error_message' => $data['error_message'] ?? 'No error message provided'
+                ]);
+                return null;
+            }
+
+            return $data['result'];
+
+        } catch (\Exception $e) {
+            Log::error("Error in getPlaceDetails: " . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Test the Google Places API connection
+     */
+    public function testConnection()
+    {
+        try {
+            // Test with a simple geocoding request
+            $response = Http::withOptions([
+                'verify' => false, // Only use in development
+            ])->get('https://maps.googleapis.com/maps/api/geocode/json', [
+                'address' => 'Sydney, Australia',
+                'key' => $this->apiKey
+            ]);
+
+            $data = $response->json();
+
+            return [
+                'status' => $response->status(),
+                'api_status' => $data['status'] ?? 'UNKNOWN',
+                'success' => $response->successful() && ($data['status'] ?? '') === 'OK',
+                'message' => $data['error_message'] ?? 'Connection successful'
             ];
         } catch (\Exception $e) {
             return [
+                'status' => 500,
+                'api_status' => 'ERROR',
                 'success' => false,
-                'error' => $e->getMessage(),
+                'message' => $e->getMessage()
             ];
         }
     }

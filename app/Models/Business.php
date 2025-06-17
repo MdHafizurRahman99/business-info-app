@@ -12,37 +12,35 @@ class Business extends Model
     protected $fillable = [
         'place_id',
         'name',
-        'category',
         'address',
+        'postcode', // Added postcode field
         'phone',
         'website',
-        'email',
-        'google_rating',
-        'user_ratings_total',
         'latitude',
         'longitude',
+        'category',
+        'google_rating',
+        'user_ratings_total'
     ];
 
-    protected $casts = [
-        'google_rating' => 'decimal:1',
-        'latitude' => 'decimal:8',
-        'longitude' => 'decimal:8',
-        'user_ratings_total' => 'integer',
-    ];
-
-    /**
-     * Get categories as an array
-     */
-    public function getCategoriesAttribute()
+    // Extract postcode from address when saving
+    protected static function booted()
     {
-        return $this->category ? explode(', ', $this->category) : [];
+        static::saving(function ($business) {
+            // Try to extract Australian postcode (4 digits at the end of the address)
+            if (!$business->postcode && $business->address) {
+                preg_match('/\b(\d{4})\b(?![\w\d])/', $business->address, $matches);
+                if (!empty($matches[1])) {
+                    $business->postcode = $matches[1];
+                }
+            }
+        });
     }
 
-    /**
-     * Set categories from an array
-     */
-    public function setCategoriesAttribute($value)
+    // Scope to search by postcode
+    public function scopeByPostcode($query, $postcode)
     {
-        $this->attributes['category'] = is_array($value) ? implode(', ', $value) : $value;
+        return $query->where('postcode', $postcode)
+                    ->orWhere('address', 'LIKE', "%$postcode%");
     }
 }
