@@ -24,3 +24,5 @@ Route::get('/businesses/search', [BusinessController::class, 'search']);
 Route::get('/businesses/test-api', [BusinessController::class, 'testApi']);
 Route::get('/businesses', [BusinessController::class, 'index']);
 Route::get('/businesses/{id}', [BusinessController::class, 'show']);
+Route::get('/business', [BusinessController::class, 'export']);
+Route::get('/business/csv', [BusinessController::class, 'exportCsv']);

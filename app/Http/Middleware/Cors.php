@@ -10,7 +10,6 @@ class Cors
 {
     public function handle(Request $request, Closure $next)
     {
-        // Handle preflight OPTIONS requests
         if ($request->isMethod('OPTIONS')) {
             return response('', 200)
                 ->header('Access-Control-Allow-Origin', '*')
@@ -20,7 +19,6 @@ class Cors
 
         $response = $next($request);
 
-        // Check if the response is not a StreamedResponse
         if (!$response instanceof StreamedResponse) {
             $response->header('Access-Control-Allow-Origin', '*')
                      ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')

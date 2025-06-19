@@ -9,6 +9,9 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Log;
+use App\Exports\BusinessExport;
+use Maatwebsite\Excel\Facades\Excel;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class BusinessController extends Controller
 {
@@ -17,6 +20,74 @@ class BusinessController extends Controller
     public function __construct(GooglePlacesService $googlePlacesService)
     {
         $this->googlePlacesService = $googlePlacesService;
+
+        // $googleRating = $request->query('google_rating');
+        // $googleRating = 4;
+
+    }
+
+    public function export(Request $request)
+    {
+        $googleRating = $request->query('google_rating');
+
+        if (!$googleRating) {
+            return response()->json(['error' => 'google_rating parameter is required'], 400);
+        }
+
+        return Excel::download(new BusinessExport($googleRating), 'businesses.xlsx');
+    }
+
+
+    public function exportCsv(Request $request)
+    {
+        $googleRating = $request->query('google_rating');
+
+        if (!$googleRating) {
+            return response()->json(['error' => 'google_rating parameter is required'], 400);
+        }
+
+        $headers = [
+            'Content-Type' => 'text/csv',
+            'Content-Disposition' => 'attachment; filename="businesses.csv"',
+        ];
+
+        $callback = function () use ($googleRating) {
+            $file = fopen('php://output', 'w');
+            fputcsv($file, [
+                'place_id',
+                'name',
+                'address',
+                'postcode',
+                'phone',
+                'website',
+                'latitude',
+                'longitude',
+                'category',
+                'google_rating',
+                'user_ratings_total'
+            ]);
+
+            $businesses = Business::where('google_rating', '<=', $googleRating)->get();
+            foreach ($businesses as $business) {
+                fputcsv($file, [
+                    $business->place_id, // Ensure field names match your database
+                    $business->name,
+                    $business->address,
+                    $business->postcode,
+                    $business->phone,
+                    $business->website,
+                    $business->latitude,
+                    $business->longitude,
+                    $business->category,
+                    $business->google_rating,
+                    $business->user_ratings_total,
+                ]);
+            }
+
+            fclose($file);
+        };
+
+        return response()->streamDownload($callback, 'businesses.csv', $headers);
     }
 
     /**
@@ -24,11 +95,12 @@ class BusinessController extends Controller
      */
     public function search(Request $request): JsonResponse
     {
-        // Validate request parameters - allow either location OR postcode
+        // Validate request parameters
         $validator = Validator::make($request->all(), [
-            'location' => 'required_without:postcode|string|max:255',
-            'postcode' => 'required_without:location|string|max:10',
-            'radius' => 'required|integer|min:1|max:50000',
+            'location' => 'required_without_all:postcode,country|string|max:255',
+            'postcode' => 'required_without_all:location,country|string|max:10',
+            'country' => 'required_without_all:location,postcode|string|in:australia',
+            'radius' => 'required_unless:country,australia|integer|min:1|max:50000',
             'category' => 'required|string|max:100',
         ]);
 
@@ -43,24 +115,48 @@ class BusinessController extends Controller
             // Get search parameters
             $location = $request->input('location');
             $postcode = $request->input('postcode');
-            $radius = $request->input('radius');
+            $country = $request->input('country');
+            $radius = $request->input('radius', 50000); // Default to max radius for country-wide search
             $category = $request->input('category');
 
-            // If postcode is provided but location isn't, convert postcode to location
-            if (!$location && $postcode) {
-                $location = $postcode . ', Australia';
-                Log::info("Using postcode as location", ['postcode' => $postcode, 'location' => $location]);
+            // Define major Australian cities for country-wide search
+            $australiaLocations = [
+                'Sydney, Australia',
+                'Melbourne, Australia',
+                'Brisbane, Australia',
+                'Perth, Australia',
+                'Adelaide, Australia',
+                'Canberra, Australia',
+                'Hobart, Australia',
+                'Darwin, Australia',
+            ];
+
+            // If country-wide search is requested
+            if ($country === 'australia') {
+                Log::info("Performing country-wide search for Australia", [
+                    'category' => $category,
+                    'radius' => $radius
+                ]);
+
+                // Search across multiple locations
+                $placesData = $this->googlePlacesService->searchPlacesAcrossLocations($australiaLocations, $radius, $category);
+            } else {
+                // If postcode is provided but location isn't, convert postcode to location
+                if (!$location && $postcode) {
+                    $location = $postcode . ', Australia';
+                    Log::info("Using postcode as location", ['postcode' => $postcode, 'location' => $location]);
+                }
+
+                Log::info("Searching for businesses", [
+                    'location' => $location,
+                    'postcode' => $postcode,
+                    'radius' => $radius,
+                    'category' => $category
+                ]);
+
+                // Search using Google Places API for a single location
+                $placesData = $this->googlePlacesService->searchPlaces($location, $radius, $category);
             }
-
-            Log::info("Searching for businesses", [
-                'location' => $location,
-                'postcode' => $postcode,
-                'radius' => $radius,
-                'category' => $category
-            ]);
-
-            // Search using Google Places API
-            $placesData = $this->googlePlacesService->searchPlaces($location, $radius, $category);
 
             Log::info("Found places from Google API", ['count' => count($placesData)]);
 
@@ -97,6 +193,7 @@ class BusinessController extends Controller
                 'search_params' => [
                     'location' => $location,
                     'postcode' => $postcode,
+                    'country' => $country,
                     'radius' => $radius,
                     'category' => $category
                 ],
@@ -116,9 +213,6 @@ class BusinessController extends Controller
 
     /**
      * Get all businesses from database with optional postcode filter
-     */
-    /**
-     * Get all businesses from database with optional filters
      */
     public function index(Request $request): JsonResponse
     {
@@ -150,9 +244,10 @@ class BusinessController extends Controller
             );
         }
 
-        // Filter by google_rating (less than or equal to 3) if provided
+        // Filter by google_rating and user_ratings_total if provided
         if ($request->has('google_rating') && $request->input('google_rating') === 'low') {
-            $query->where('google_rating', '<=', 3);
+            $query->where('google_rating', '<=', 4)->whereNotNull('google_rating');
+            $query->where('user_ratings_total', '>=', 10)->whereNotNull('user_ratings_total');
         }
 
         $businesses = $query->orderBy('google_rating', 'desc')->paginate(20);

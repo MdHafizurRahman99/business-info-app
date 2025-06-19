@@ -15,9 +15,7 @@ class GooglePlacesService
         $this->apiKey = config('services.google_places.api_key');
     }
 
-    /**
-     * Search for places using Google Places API
-     */
+
     public function searchPlaces($location, $radius = 5000, $type = 'restaurant')
     {
         try {
@@ -27,7 +25,6 @@ class GooglePlacesService
                 'type' => $type
             ]);
 
-            // First, geocode the location or postcode
             $geocodeData = $this->geocodeLocation($location);
 
             if (!$geocodeData) {
@@ -44,9 +41,8 @@ class GooglePlacesService
                 'formatted_address' => $geocodeData['formatted_address'] ?? $location
             ]);
 
-            // Now search for places near this location
             $response = Http::withOptions([
-                'verify' => false, // Only use in development
+                'verify' => false,
             ])->get("{$this->baseUrl}/nearbysearch/json", [
                 'location' => "{$lat},{$lng}",
                 'radius' => $radius,
@@ -74,7 +70,10 @@ class GooglePlacesService
 
             $businesses = [];
             foreach ($data['results'] as $result) {
-                // Get details for each place to get more information
+                if (!isset($result['rating']) || $result['rating'] > 4 || !isset($result['user_ratings_total']) || $result['user_ratings_total'] < 10) {
+                    continue;
+                }
+
                 $details = $this->getPlaceDetails($result['place_id']);
 
                 $businesses[] = [
@@ -91,7 +90,7 @@ class GooglePlacesService
                 ];
             }
 
-            Log::info("Found " . count($businesses) . " businesses");
+            Log::info("Found " . count($businesses) . " businesses after filtering");
             return $businesses;
 
         } catch (\Exception $e) {
@@ -102,14 +101,33 @@ class GooglePlacesService
         }
     }
 
-    /**
-     * Geocode a location string to coordinates
-     */
+
+    public function searchPlacesAcrossLocations($locations, $radius = 50000, $type = 'restaurant')
+    {
+        $allBusinesses = [];
+        foreach ($locations as $location) {
+            $businesses = $this->searchPlaces($location, $radius, $type);
+            $allBusinesses = array_merge($allBusinesses, $businesses);
+        }
+
+        $uniqueBusinesses = [];
+        $placeIds = [];
+        foreach ($allBusinesses as $business) {
+            if (!in_array($business['place_id'], $placeIds)) {
+                $placeIds[] = $business['place_id'];
+                $uniqueBusinesses[] = $business;
+            }
+        }
+
+        Log::info("Total unique businesses found across locations: " . count($uniqueBusinesses));
+        return $uniqueBusinesses;
+    }
+
     protected function geocodeLocation($location)
     {
         try {
             $response = Http::withOptions([
-                'verify' => false, // Only use in development
+                'verify' => false,
             ])->get('https://maps.googleapis.com/maps/api/geocode/json', [
                 'address' => $location,
                 'key' => $this->apiKey
@@ -146,14 +164,12 @@ class GooglePlacesService
         }
     }
 
-    /**
-     * Get detailed information about a place
-     */
+
     protected function getPlaceDetails($placeId)
     {
         try {
             $response = Http::withOptions([
-                'verify' => false, // Only use in development
+                'verify' => false,
             ])->get("{$this->baseUrl}/details/json", [
                 'place_id' => $placeId,
                 'fields' => 'formatted_address,formatted_phone_number,website',
@@ -186,15 +202,12 @@ class GooglePlacesService
         }
     }
 
-    /**
-     * Test the Google Places API connection
-     */
+
     public function testConnection()
     {
         try {
-            // Test with a simple geocoding request
             $response = Http::withOptions([
-                'verify' => false, // Only use in development
+                'verify' => false,
             ])->get('https://maps.googleapis.com/maps/api/geocode/json', [
                 'address' => 'Sydney, Australia',
                 'key' => $this->apiKey
